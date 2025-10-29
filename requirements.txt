@@ -1,0 +1,38 @@
+# AI Forecasting Pipeline - Dependencies
+# Python 3.11+
+
+# CLI and API Framework
+typer>=0.9.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# HTTP and Web Scraping
+httpx>=0.25.0
+beautifulsoup4>=4.12.0
+readability-lxml>=0.8.1
+trafilatura>=1.6.0
+robotexclusionrulesparser>=1.7.1
+
+# Retry Logic
+tenacity>=8.2.0
+
+# Database
+sqlalchemy>=2.0.0
+
+# Data Models and Settings
+pydantic>=2.4.0
+pydantic-settings>=2.0.0
+
+# Machine Learning and Clustering
+numpy>=1.24.0
+scikit-learn>=1.3.0
+
+# LLM APIs
+google-generativeai>=0.3.0
+openai>=1.3.0
+
+# Configuration
+python-dotenv>=1.0.0
+
+# Logging
+structlog>=23.2.0
