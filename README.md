@@ -23,6 +23,31 @@ This system automates the process of:
 
 ### Installation
 
+#### Option 1: Automated Setup (Recommended)
+
+**macOS/Linux:**
+```bash
+git clone <repository-url>
+cd AI-forecasting-demo
+chmod +x setup_venv.sh
+./setup_venv.sh
+```
+
+**Windows:**
+```cmd
+git clone <repository-url>
+cd AI-forecasting-demo
+setup_venv.bat
+```
+
+The setup script will:
+- Check Python version (3.11+ required)
+- Create virtual environment in `./venv`
+- Install all dependencies from requirements.txt
+- Provide next steps guidance
+
+#### Option 2: Manual Setup
+
 1. Clone the repository:
 ```bash
 git clone <repository-url>
@@ -31,12 +56,18 @@ cd AI-forecasting-demo
 
 2. Create and activate a virtual environment:
 ```bash
+# macOS/Linux
+python3 -m venv venv
+source venv/bin/activate
+
+# Windows
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+venv\Scripts\activate
 ```
 
 3. Install dependencies:
 ```bash
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
@@ -45,6 +76,8 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env and add your API keys
 ```
+
+📖 **Detailed virtual environment guide**: See [VENV_SETUP.md](VENV_SETUP.md) for troubleshooting and IDE integration.
 
 ### Configuration
 
@@ -57,9 +90,54 @@ GOOGLE_GEMINI_API_KEY=your_gemini_api_key
 OPENAI_API_KEY=your_openai_api_key
 ```
 
-### Usage
+### First Run
 
-(Usage instructions will be added as CLI commands are implemented)
+1. **Activate the virtual environment** (if not already active):
+```bash
+source venv/bin/activate  # macOS/Linux
+# or
+venv\Scripts\activate     # Windows
+```
+
+2. **Initialize the database**:
+```bash
+python cli.py init
+```
+
+3. **Run your first forecast**:
+```bash
+python cli.py run "Will China mass-produce humanoid robots by the end of 2025?"
+```
+
+4. **Check the results**:
+```bash
+python cli.py status 1
+python cli.py report 1
+```
+
+### Common Commands
+
+```bash
+# Run a forecast
+python cli.py run "Your forecasting question"
+
+# Resume a failed run
+python cli.py resume <run_id>
+
+# Check run status
+python cli.py status <run_id>
+
+# List all runs
+python cli.py list
+
+# Generate detailed report
+python cli.py report <run_id>
+
+# Show help
+python cli.py --help
+```
+
+📖 **Full usage guide**: See [USAGE.md](USAGE.md) for complete CLI reference and examples.
 
 ## Project Structure
 

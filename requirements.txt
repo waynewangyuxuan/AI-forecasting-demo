@@ -3,6 +3,7 @@
 
 # CLI and API Framework
 typer>=0.9.0
+rich>=13.7.0  # Rich terminal formatting for CLI
 fastapi>=0.104.0
 uvicorn>=0.24.0
 
@@ -12,6 +13,7 @@ beautifulsoup4>=4.12.0
 readability-lxml>=0.8.1
 trafilatura>=1.6.0
 robotexclusionrulesparser>=1.7.1
+langdetect>=1.0.9  # Language detection for document filtering
 
 # Retry Logic
 tenacity>=8.2.0
