@@ -6,7 +6,9 @@
       "Bash(python db/migrate.py:*)",
       "Bash(sqlite3:*)",
       "Bash(python:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

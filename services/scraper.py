@@ -7,6 +7,7 @@ rate limiting, retry logic, and comprehensive error handling.
 
 import asyncio
 import hashlib
+import logging
 import re
 from typing import List, Optional, Dict, Any, Set
 from urllib.parse import urlparse
@@ -448,7 +449,7 @@ class WebScraper:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.ConnectError)),
-        before_sleep=before_sleep_log(logger, structlog.INFO),
+        before_sleep=before_sleep_log(logger, logging.INFO),
     )
     async def _fetch_url(self, url: str, client: httpx.AsyncClient) -> str:
         """

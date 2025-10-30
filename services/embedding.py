@@ -8,6 +8,7 @@ caching, batch processing, and async API calls for efficiency.
 import asyncio
 import hashlib
 import json
+import logging
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
@@ -301,7 +302,7 @@ class EmbeddingService:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception_type((EmbeddingRateLimitError, EmbeddingError)),
-        before_sleep=before_sleep_log(logger, structlog.INFO),
+        before_sleep=before_sleep_log(logger, logging.INFO),
     )
     async def _generate_embedding_async(self, text: str) -> np.ndarray:
         """

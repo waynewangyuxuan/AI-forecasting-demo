@@ -6,6 +6,7 @@ with retry logic, rate limiting, and error handling.
 """
 
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any, List
@@ -224,7 +225,7 @@ class GeminiClient(LLMClient):
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
         retry=retry_if_exception_type((RateLimitError, LLMError)),
-        before_sleep=before_sleep_log(logger, structlog.INFO),
+        before_sleep=before_sleep_log(logger, logging.INFO),
     )
     def generate(
         self,
@@ -355,12 +356,30 @@ class GeminiClient(LLMClient):
         try:
             return json.loads(response)
         except json.JSONDecodeError as e:
-            self.logger.error(
-                "gemini_json_parse_error",
+            # Try to fix common Gemini JSON issues
+            self.logger.warning(
+                "gemini_json_parse_error_attempting_fix",
                 error=str(e),
                 response=response[:500],
             )
-            raise ParsingError(f"Failed to parse JSON response: {e}")
+
+            # Fix: Gemini sometimes double-escapes special chars like \$
+            # Replace \\$ with $ and other common issues
+            fixed_response = response.replace('\\$', '$')
+            fixed_response = fixed_response.replace('\\"', '"')  # Fix double-escaped quotes
+
+            try:
+                result = json.loads(fixed_response)
+                self.logger.info("gemini_json_fixed", original_error=str(e))
+                return result
+            except json.JSONDecodeError as e2:
+                self.logger.error(
+                    "gemini_json_parse_error_unfixable",
+                    error=str(e2),
+                    original_response=response[:500],
+                    fixed_response=fixed_response[:500],
+                )
+                raise ParsingError(f"Failed to parse JSON response: {e2}")
 
     def generate_with_retry_on_parse_error(
         self,

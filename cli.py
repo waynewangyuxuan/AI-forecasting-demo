@@ -449,8 +449,8 @@ def init():
         settings.outputs_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize repository (will create tables)
-        from db.migrate import run_migrations
-        run_migrations()
+        from db.migrate import migrate
+        migrate()
 
         _print_status("Database initialized successfully!", "success")
         _print_status(f"Database location: {settings.data_dir / 'forecast.db'}", "info")

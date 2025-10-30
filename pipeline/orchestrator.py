@@ -26,7 +26,7 @@ from db.models import (
 from services import (
     QueryGenerator, GoogleSearchService, WebScraper, DocumentProcessor,
     EventExtractor, EmbeddingService, ClusteringService, TimelineBuilder,
-    ForecastGenerator, create_llm_client
+    ForecastGenerator, create_llm_client, scrape_urls
 )
 
 logger = structlog.get_logger(__name__)
@@ -360,18 +360,23 @@ class PipelineOrchestrator:
         self._update_progress(ctx, stage, f"Generating search queries for: {ctx.question_text}")
 
         try:
-            # Generate queries
-            queries = await ctx.query_generator.generate_queries_async(ctx.question_text)
+            # Generate queries (synchronous call)
+            query_objects = ctx.query_generator.generate_queries(
+                question=ctx.question_text,
+                run_id=ctx.run_id,
+                prior_queries=None
+            )
 
             # Save to database
             if not ctx.dry_run:
-                for query_text in queries:
-                    query = SearchQuery(
-                        run_id=ctx.run_id,
-                        query_text=query_text,
-                        prompt_version=ctx.query_generator.prompt_version
-                    )
+                for query in query_objects:
                     self.repo.create_search_query(query)
+
+            # Extract query texts for next stage
+            queries = [q.query_text for q in query_objects]
+
+            # Save to context for later stages
+            ctx.generated_queries = query_objects
 
             self._update_stage_state(ctx, PipelineStage.QUERY_GEN)
 
@@ -425,23 +430,17 @@ class PipelineOrchestrator:
             try:
                 self._update_progress(ctx, stage, f"Query {i}/{len(queries)}: {query.query_text[:50]}...")
 
-                # Execute search
-                results = await ctx.search_service.search_async(
-                    query.query_text,
+                # Execute search (synchronous)
+                results = ctx.search_service.search(
+                    query=query.query_text,
+                    query_id=query.id,
                     num_results=ctx.max_urls or settings.search_results_per_query
                 )
 
-                # Save results to database
+                # Save results to database (results are already SearchResult objects)
                 if not ctx.dry_run:
-                    for rank, result in enumerate(results, 1):
-                        search_result = SearchResult(
-                            query_id=query.id,
-                            url=result['url'],
-                            title=result.get('title'),
-                            snippet=result.get('snippet'),
-                            rank=rank
-                        )
-                        self.repo.create_search_result(search_result)
+                    for result in results:
+                        self.repo.create_search_result(result)
 
                 total_results += len(results)
                 success_count += 1
@@ -505,31 +504,35 @@ class PipelineOrchestrator:
 
         self._update_progress(ctx, stage, f"Scraping {len(unique_urls)} unique URLs")
 
-        # Scrape URLs
-        scrape_results = await ctx.scraper.scrape_urls(unique_urls)
+        # Scrape URLs (using module-level function)
+        scrape_results = await scrape_urls(
+            urls=unique_urls,
+            run_id=ctx.run_id,
+            max_concurrent=5,
+            timeout=30,
+            check_robots=True
+        )
 
         success_count = 0
         fail_count = 0
 
         for result in scrape_results:
-            if result.success and result.cleaned_content:
-                # Compute content hash
-                content_hash = hashlib.sha256(
-                    result.cleaned_content.encode('utf-8')
-                ).hexdigest()
+            if result.success and result.document:
+                doc = result.document
 
                 # Check if document already exists
                 if not ctx.dry_run:
-                    existing = self.repo.get_document_by_hash(ctx.run_id, content_hash)
+                    existing = self.repo.get_document_by_hash(ctx.run_id, doc.content_hash)
                     if existing:
                         continue  # Skip duplicate
 
+                    # Create document record
                     document = Document(
                         run_id=ctx.run_id,
-                        url=result.url,
-                        content_hash=content_hash,
-                        raw_content=result.raw_content,
-                        cleaned_content=result.cleaned_content,
+                        url=doc.url,
+                        content_hash=doc.content_hash,
+                        raw_content=doc.raw_content,
+                        cleaned_content=doc.cleaned_content,
                         status='success'
                     )
                     self.repo.create_document(document)
@@ -537,8 +540,8 @@ class PipelineOrchestrator:
                 success_count += 1
             else:
                 fail_count += 1
-                if result.error:
-                    self._log_error(ctx, stage, Exception(result.error), reference=result.url)
+                if result.error_message:
+                    self._log_error(ctx, stage, Exception(result.error_message), reference=result.url)
 
         self._update_stage_state(ctx, PipelineStage.SCRAPE)
 
@@ -597,17 +600,11 @@ class PipelineOrchestrator:
             try:
                 self._update_progress(ctx, stage, f"Document {i}/{len(documents)}")
 
-                # Chunk document
-                chunks = ctx.doc_processor.chunk_document(
-                    doc.cleaned_content or "",
-                    url=doc.url
-                )
+                # Chunk document (pass Document object, not string)
+                chunks = ctx.doc_processor.chunk_document(doc)
 
-                # Extract events from chunks
-                events = await ctx.event_extractor.extract_events_from_chunks_async(
-                    chunks,
-                    question=ctx.question_text
-                )
+                # Extract events from chunks (async method)
+                events = await ctx.event_extractor.extract_from_chunks(chunks=chunks)
 
                 # Apply max_events limit if specified
                 if ctx.max_events and total_events + len(events) > ctx.max_events:
@@ -853,8 +850,8 @@ class PipelineOrchestrator:
             documents_by_id=doc_by_id
         )
 
-        # Generate forecast
-        forecast = await ctx.forecast_generator.generate_forecast_async(
+        # Generate forecast (synchronous method)
+        forecast = ctx.forecast_generator.generate_forecast(
             question=ctx.question_text,
             timeline=timeline
         )

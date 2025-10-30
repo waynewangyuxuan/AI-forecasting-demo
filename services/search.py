@@ -5,6 +5,7 @@ Integrates with Google Custom Search JSON API to retrieve relevant URLs
 for forecasting questions with rate limiting, error handling, and result storage.
 """
 
+import logging
 import time
 from typing import List, Optional, Dict, Any
 from enum import Enum
@@ -223,7 +224,7 @@ class GoogleSearchService:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=4, max=60),
         retry=retry_if_exception_type((RateLimitError, SearchError)),
-        before_sleep=before_sleep_log(logger, structlog.INFO),
+        before_sleep=before_sleep_log(logger, logging.INFO),
     )
     def search(
         self,
