@@ -77,8 +77,8 @@ def db_repository(temp_db_path):
     repo = DatabaseRepository(temp_db_path)
 
     # Create tables
-    from db.migrate import create_tables
-    create_tables(temp_db_path)
+    from db.migrate import migrate
+    migrate(temp_db_path, verbose=False)
 
     yield repo
 

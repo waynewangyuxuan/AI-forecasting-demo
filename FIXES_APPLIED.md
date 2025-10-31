@@ -312,7 +312,48 @@ But orchestrator was passing:
 
 All issues resolved! The pipeline should now run without import or method name errors.
 
-Run `python cli.py run "Your question"` to test.
+## Database Operations Verification
+
+**Created comprehensive test suite** to verify all database operations work correctly:
+
+**Files Created:**
+- ✅ `tests/unit/test_database_operations.py` - 13 comprehensive database tests
+- ✅ `tests/conftest.py` - Fixed to use `migrate()` instead of `create_tables()`
+- ✅ `DATABASE_TEST_RESULTS.md` - Full test results documentation
+
+**Test Results:** ✅ **13/13 PASSING**
+
+**Tests Cover:**
+1. Table creation
+2. Question CRUD
+3. Run CRUD with status updates
+4. Search queries and results
+5. Document storage and retrieval
+6. Event extraction and storage
+7. Embedding binary data storage
+8. Event clustering
+9. Timeline entries with JSON fields
+10. Forecast storage with reasoning/caveats
+11. Error logging
+12. Run metrics
+13. **Full pipeline data flow** (simulates all 8 stages)
+
+**Key Verification:**
+- ✅ All tables created correctly
+- ✅ All CRUD operations working
+- ✅ Foreign key relationships maintained
+- ✅ JSON serialization/deserialization working
+- ✅ Binary data (embeddings) stored and retrieved correctly
+- ✅ Complete pipeline data flow integrity verified
+
+**Run Tests:**
+```bash
+python -m pytest tests/unit/test_database_operations.py -v
+```
+
+See [DATABASE_TEST_RESULTS.md](DATABASE_TEST_RESULTS.md) for full details.
+
+Run `python cli.py run "Your question"` to test the full pipeline.
 
 ## New Feature: Multi-LLM Provider Support
 
