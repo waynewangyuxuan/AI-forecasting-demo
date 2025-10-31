@@ -66,7 +66,7 @@ python cli.py init
 ## Run Your First Forecast (2 minutes)
 
 ```bash
-python cli.py run "Will Bitcoin reach $50,000 by June 2024?"
+python cli.py run "Will Bitcoin reach $150,000 by June 2026?"
 ```
 
 That's it! The pipeline will:

@@ -476,6 +476,31 @@ class WebScraper:
                     url,
                 )
 
+        # Check known blocking domains (fail fast without network call)
+        blocked_domains = [
+            'sciencedirect.com',
+            'researchgate.net',
+            'ark-invest.com',
+            'jstor.org',
+            'springer.com',
+            'ieee.org',
+        ]
+        parsed_url = urlparse(url)
+        domain = parsed_url.netloc.lower()
+        for blocked in blocked_domains:
+            if blocked in domain:
+                self.stats["robots_blocked"] += 1
+                self.logger.warning(
+                    "known_blocker_skipped",
+                    url=url,
+                    domain=blocked,
+                )
+                raise ScraperError(
+                    f"URL from known blocking domain: {domain}",
+                    ScraperErrorType.FORBIDDEN,
+                    url,
+                )
+
         # Fetch URL
         user_agent = self._get_next_user_agent()
         headers = {

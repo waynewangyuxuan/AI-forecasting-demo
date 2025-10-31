@@ -21,6 +21,7 @@ from tenacity import (
 import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 from google.api_core import exceptions as google_exceptions
+from openai import OpenAI, RateLimitError as OpenAIRateLimitError, APIError as OpenAIAPIError
 
 from config.settings import settings
 
@@ -426,6 +427,264 @@ class GeminiClient(LLMClient):
                     raise
 
 
+class OpenAIClient(LLMClient):
+    """
+    Concrete implementation for OpenAI API.
+
+    Provides retry logic with exponential backoff, rate limiting,
+    and comprehensive error handling for the OpenAI API.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model_name: Optional[str] = None,
+        cache_responses: bool = False,
+    ):
+        """
+        Initialize OpenAI client.
+
+        Args:
+            api_key: OpenAI API key (defaults to settings)
+            model_name: Model name (defaults to settings)
+            cache_responses: Whether to cache responses for development
+        """
+        api_key = api_key or settings.openai_api_key
+        model_name = model_name or settings.openai_llm_model
+        super().__init__(api_key, model_name)
+
+        # Initialize OpenAI client
+        self.client = OpenAI(api_key=self.api_key)
+
+        # Response caching for development
+        self.cache_responses = cache_responses
+        self._response_cache: Dict[str, str] = {}
+
+        # Rate limiting state
+        self._last_request_time = 0.0
+        self._min_request_interval = 0.1  # 100ms between requests
+
+        self.logger.info(
+            "openai_client_initialized",
+            model=self.model_name,
+            cache_enabled=self.cache_responses,
+        )
+
+    def _rate_limit(self) -> None:
+        """Enforce minimum time between requests."""
+        elapsed = time.time() - self._last_request_time
+        if elapsed < self._min_request_interval:
+            sleep_time = self._min_request_interval - elapsed
+            time.sleep(sleep_time)
+        self._last_request_time = time.time()
+
+    def _get_cache_key(self, prompt: str, temperature: float, max_tokens: Optional[int]) -> str:
+        """Generate cache key for a request."""
+        return f"{hash(prompt)}_{temperature}_{max_tokens}"
+
+    def _handle_api_error(self, error: Exception) -> None:
+        """
+        Categorize and re-raise API errors.
+
+        Args:
+            error: The caught exception
+
+        Raises:
+            QuotaExhaustedError: For quota/resource exhaustion
+            RateLimitError: For rate limiting
+            LLMError: For other errors
+        """
+        error_str = str(error).lower()
+
+        # Check for quota exhaustion
+        if "quota" in error_str or "insufficient" in error_str:
+            self.logger.error("openai_quota_exhausted", error=str(error))
+            raise QuotaExhaustedError(f"OpenAI API quota exhausted: {error}")
+
+        # Check for rate limiting
+        if isinstance(error, OpenAIRateLimitError) or "rate" in error_str:
+            self.logger.warning("openai_rate_limited", error=str(error))
+            raise RateLimitError(f"OpenAI API rate limited: {error}")
+
+        # Generic error
+        self.logger.error("openai_api_error", error=str(error), error_type=type(error).__name__)
+        raise LLMError(f"OpenAI API error: {error}")
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((RateLimitError, LLMError)),
+        before_sleep=before_sleep_log(logger, logging.INFO),
+    )
+    def generate(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[str] = None,
+    ) -> str:
+        """
+        Generate text from OpenAI API with retry logic.
+
+        Args:
+            prompt: Input prompt for the LLM
+            temperature: Sampling temperature (0.0-1.0)
+            max_tokens: Maximum tokens to generate
+            response_format: Expected response format ("json" or "text")
+
+        Returns:
+            Generated text from OpenAI
+
+        Raises:
+            QuotaExhaustedError: When API quota is exhausted
+            RateLimitError: When rate limit is hit (retried)
+            ParsingError: When response cannot be parsed
+            LLMError: For other API errors (retried)
+        """
+        # Check cache first
+        if self.cache_responses:
+            cache_key = self._get_cache_key(prompt, temperature, max_tokens)
+            if cache_key in self._response_cache:
+                self.logger.debug("openai_cache_hit", cache_key=cache_key)
+                return self._response_cache[cache_key]
+
+        # Rate limiting
+        self._rate_limit()
+
+        try:
+            self.logger.debug(
+                "openai_generate_start",
+                prompt_length=len(prompt),
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+
+            # Prepare request parameters
+            request_params = {
+                "model": self.model_name,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+            }
+
+            if max_tokens:
+                request_params["max_tokens"] = max_tokens
+
+            # Add JSON mode if requested
+            if response_format == "json":
+                request_params["response_format"] = {"type": "json_object"}
+
+            # Generate response
+            response = self.client.chat.completions.create(**request_params)
+
+            # Extract text from response
+            result = response.choices[0].message.content
+            if not result:
+                raise ParsingError("Empty response from OpenAI")
+
+            result = result.strip()
+
+            # Update stats
+            self.request_count += 1
+            if hasattr(response, "usage") and response.usage:
+                self.total_tokens += response.usage.total_tokens
+
+            self.logger.info(
+                "openai_generate_success",
+                request_count=self.request_count,
+                response_length=len(result),
+                total_tokens=self.total_tokens,
+            )
+
+            # Cache if enabled
+            if self.cache_responses:
+                cache_key = self._get_cache_key(prompt, temperature, max_tokens)
+                self._response_cache[cache_key] = result
+
+            return result
+
+        except Exception as e:
+            self._handle_api_error(e)
+
+    def generate_json(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate JSON response from OpenAI.
+
+        Args:
+            prompt: Input prompt (should request JSON output)
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens to generate
+
+        Returns:
+            Parsed JSON object
+
+        Raises:
+            ParsingError: When response is not valid JSON
+            Other exceptions from generate()
+        """
+        response = self.generate(
+            prompt=prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format="json",
+        )
+
+        try:
+            return json.loads(response)
+        except json.JSONDecodeError as e:
+            self.logger.error(
+                "openai_json_parse_error",
+                error=str(e),
+                response=response[:500],
+            )
+            raise ParsingError(f"Failed to parse JSON response: {e}")
+
+    def generate_with_retry_on_parse_error(
+        self,
+        prompt: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        response_format: Optional[str] = None,
+        max_retries: int = 2,
+    ) -> str:
+        """
+        Generate with automatic retry on parsing errors.
+
+        Args:
+            prompt: Input prompt
+            temperature: Sampling temperature
+            max_tokens: Maximum tokens
+            response_format: Expected format
+            max_retries: Number of retries on parse errors
+
+        Returns:
+            Generated text
+        """
+        for attempt in range(max_retries + 1):
+            try:
+                return self.generate(
+                    prompt=prompt,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                )
+            except ParsingError as e:
+                if attempt < max_retries:
+                    self.logger.warning(
+                        "openai_parse_error_retry",
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        error=str(e),
+                    )
+                    time.sleep(1)  # Brief pause before retry
+                else:
+                    raise
+
+
 def create_llm_client(
     provider: str = "gemini",
     api_key: Optional[str] = None,
@@ -436,7 +695,7 @@ def create_llm_client(
     Factory function to create LLM clients.
 
     Args:
-        provider: Provider name ("gemini" currently supported)
+        provider: Provider name ("gemini" or "openai")
         api_key: API key for the provider
         model_name: Model name
         **kwargs: Additional provider-specific arguments
@@ -447,7 +706,10 @@ def create_llm_client(
     Raises:
         ValueError: If provider is not supported
     """
-    if provider.lower() == "gemini":
+    provider = provider.lower()
+    if provider == "gemini":
         return GeminiClient(api_key=api_key, model_name=model_name, **kwargs)
+    elif provider == "openai":
+        return OpenAIClient(api_key=api_key, model_name=model_name, **kwargs)
     else:
         raise ValueError(f"Unsupported LLM provider: {provider}")

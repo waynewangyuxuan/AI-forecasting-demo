@@ -14,6 +14,7 @@ from enum import Enum
 
 import structlog
 
+from config.settings import settings
 from services.llm_client import LLMClient, create_llm_client, ParsingError
 from services.doc_processor import DocumentChunk
 from db.models import Event
@@ -104,16 +105,18 @@ Focus on events that are relevant to this forecasting question.
 {context_section}
 
 INSTRUCTIONS:
-1. Extract ONLY factual events that have actually occurred or are scheduled to occur
-2. Each event MUST have a temporal anchor (date, timeframe, or clear temporal reference)
-3. Focus on events involving concrete actions, decisions, announcements, or measurable changes
-4. Include the key actors/entities involved
-5. Extract a supporting quote directly from the source text
-6. Provide confidence score based on:
+1. Extract ONLY the TOP 3-5 MOST IMPORTANT factual events that have actually occurred or are scheduled to occur
+2. Prioritize events most relevant to the forecasting question
+3. Each event MUST have a temporal anchor (date, timeframe, or clear temporal reference)
+4. Focus on events involving concrete actions, decisions, announcements, or measurable changes
+5. Include the key actors/entities involved
+6. Extract a supporting quote directly from the source text
+7. Provide confidence score based on:
    - Timestamp specificity (exact date > month > year > vague)
    - Clarity of the event description
    - Presence of supporting details
    - Source credibility indicators
+8. LIMIT: Extract maximum 5 events per chunk to ensure complete, valid JSON responses
 
 WHAT TO EXTRACT:
 - Policy announcements and decisions
@@ -150,10 +153,12 @@ Return a JSON object with the following structure:
 
 If no clear events with temporal anchors are found, return: {{"events": []}}
 
+IMPORTANT: Extract maximum 5 events to keep response concise and prevent truncation.
+
 TEXT TO ANALYZE:
 {chunk_text}
 
-Extract events in JSON format:"""
+Extract the top 3-5 most important events in JSON format:"""
 
     return prompt
 
@@ -177,6 +182,7 @@ class EventExtractor:
         batch_size: int = 5,
         temperature: float = 0.3,
         max_retries: int = 2,
+        max_tokens: Optional[int] = None,
         question_context: Optional[str] = None,
     ):
         """
@@ -187,12 +193,14 @@ class EventExtractor:
             batch_size: Number of chunks to process in parallel
             temperature: LLM temperature for extraction
             max_retries: Maximum retries for malformed JSON
+            max_tokens: Maximum tokens for LLM responses (defaults to settings)
             question_context: Optional forecasting question for context
         """
         self.llm_client = llm_client or create_llm_client()
         self.batch_size = batch_size
         self.temperature = temperature
         self.max_retries = max_retries
+        self.max_tokens = max_tokens or settings.event_extraction_max_tokens
         self.question_context = question_context
         self.logger = structlog.get_logger(__name__)
 
@@ -357,13 +365,34 @@ class EventExtractor:
 
         except json.JSONDecodeError as e:
             # Try to extract JSON from response (sometimes LLMs add extra text)
+            # NO RECURSION - just try to parse directly to avoid error log spam
             json_match = re.search(r'\{.*\}', response, re.DOTALL)
             if json_match:
                 try:
-                    return self._parse_llm_response(json_match.group(0), chunk)
-                except:
+                    data = json.loads(json_match.group(0))
+                    # If we got valid JSON with events array, process it
+                    if "events" in data and isinstance(data["events"], list):
+                        events = []
+                        for event_data in data["events"]:
+                            specificity = event_data.get("timestamp_specificity", "day")
+                            confidence = self._calculate_confidence(event_data, chunk)
+                            event = ExtractedEvent(
+                                timestamp=event_data["timestamp"],
+                                headline=event_data["headline"],
+                                body=event_data["body"],
+                                actors=event_data["actors"] if isinstance(event_data["actors"], list) else [],
+                                quote=event_data["quote"],
+                                confidence=confidence,
+                                timestamp_specificity=specificity,
+                                source_chunk_id=chunk.chunk_id,
+                                raw_response=response,
+                            )
+                            events.append(event)
+                        return events
+                except Exception:
                     pass
 
+            # Log error only once
             self.logger.error(
                 "json_parse_error",
                 chunk_id=chunk.chunk_id,
@@ -387,6 +416,21 @@ class EventExtractor:
         Returns:
             List of extracted events
         """
+        import time
+        start_time = time.time()
+
+        # Log chunk extraction start with metadata
+        content_preview = chunk.content[:100].replace('\n', ' ') if chunk.content else ""
+        self.logger.info(
+            "chunk_extraction_start",
+            chunk_id=chunk.chunk_id,
+            doc_id=chunk.source_doc_id,
+            token_count=chunk.token_count,
+            retry_count=retry_count,
+            content_preview=content_preview,
+            source_url=chunk.metadata.get("source_url") if chunk.metadata else None,
+        )
+
         try:
             # Generate prompt
             prompt = get_event_extraction_prompt(
@@ -398,7 +442,7 @@ class EventExtractor:
             response = self.llm_client.generate(
                 prompt=prompt,
                 temperature=self.temperature,
-                max_tokens=2000,
+                max_tokens=self.max_tokens,
                 response_format="json",
             )
 
@@ -411,26 +455,33 @@ class EventExtractor:
             if not events:
                 self.stats["empty_results"] += 1
 
+            duration = time.time() - start_time
             self.logger.info(
-                "events_extracted_from_chunk",
+                "chunk_extraction_complete",
                 chunk_id=chunk.chunk_id,
                 event_count=len(events),
                 doc_id=chunk.source_doc_id,
+                duration_seconds=round(duration, 2),
+                tokens_per_second=round(chunk.token_count / duration, 1) if duration > 0 else 0,
             )
 
             return events
 
         except ParsingError as e:
             self.stats["parse_errors"] += 1
+            duration = time.time() - start_time
 
             # Retry if we haven't exceeded max retries
             if retry_count < self.max_retries:
                 self.logger.warning(
                     "event_extraction_parse_error_retry",
                     chunk_id=chunk.chunk_id,
+                    doc_id=chunk.source_doc_id,
                     retry_count=retry_count + 1,
                     max_retries=self.max_retries,
                     error=str(e),
+                    duration_before_retry=round(duration, 2),
+                    source_url=chunk.metadata.get("source_url") if chunk.metadata else None,
                 )
                 # Add a brief delay before retry
                 import asyncio
@@ -440,7 +491,10 @@ class EventExtractor:
                 self.logger.error(
                     "event_extraction_parse_error_max_retries",
                     chunk_id=chunk.chunk_id,
+                    doc_id=chunk.source_doc_id,
                     error=str(e),
+                    total_duration=round(duration, 2),
+                    source_url=chunk.metadata.get("source_url") if chunk.metadata else None,
                 )
                 return []
 

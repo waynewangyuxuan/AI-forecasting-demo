@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 
 from config.settings import settings
 from db.models import SearchQuery
-from services.llm_client import LLMClient, GeminiClient
+from services.llm_client import LLMClient, create_llm_client
 
 logger = structlog.get_logger(__name__)
 
@@ -110,7 +110,7 @@ class QueryGenerator:
             llm_client: LLM client to use (defaults to GeminiClient)
             max_queries: Maximum number of queries to generate
         """
-        self.llm_client = llm_client or GeminiClient()
+        self.llm_client = llm_client or create_llm_client(provider=settings.llm_provider)
         self.max_queries = max_queries or settings.max_search_queries
         self.logger = structlog.get_logger(__name__)
 

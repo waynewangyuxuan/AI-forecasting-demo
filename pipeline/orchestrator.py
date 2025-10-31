@@ -20,13 +20,16 @@ from config.settings import settings
 from db.repository import DatabaseRepository
 from db.models import (
     Question, Run, RunStatus, SearchQuery, SearchResult, Document, Event,
-    Embedding, EventCluster, TimelineEntry as TimelineEntryModel, Forecast as ForecastModel,
+    Embedding, EventCluster, TimelineEntry as TimelineEntryModel,
     RunMetric, Error
 )
 from services import (
     QueryGenerator, GoogleSearchService, WebScraper, DocumentProcessor,
     EventExtractor, EmbeddingService, ClusteringService, TimelineBuilder,
     ForecastGenerator, create_llm_client, scrape_urls
+)
+from services.clustering import (
+    EventCluster as ServiceEventCluster, ClusteringResult, ClusteringAlgorithm
 )
 
 logger = structlog.get_logger(__name__)
@@ -124,7 +127,7 @@ class PipelineOrchestrator:
         """
         # LLM client
         if not ctx.llm_client:
-            ctx.llm_client = create_llm_client()
+            ctx.llm_client = create_llm_client(provider=settings.llm_provider)
 
         # Query generator
         if not ctx.query_generator:
@@ -603,8 +606,30 @@ class PipelineOrchestrator:
                 # Chunk document (pass Document object, not string)
                 chunks = ctx.doc_processor.chunk_document(doc)
 
+                # Log document extraction start with chunk info
+                avg_chunk_tokens = sum(c.token_count for c in chunks) / len(chunks) if chunks else 0
+                self.logger.info(
+                    "document_event_extraction_start",
+                    doc_id=doc.id,
+                    doc_num=f"{i}/{len(documents)}",
+                    url=doc.url[:100] if doc.url else None,
+                    chunk_count=len(chunks),
+                    avg_chunk_tokens=round(avg_chunk_tokens, 0),
+                    total_doc_tokens=sum(c.token_count for c in chunks),
+                )
+
                 # Extract events from chunks (async method)
                 events = await ctx.event_extractor.extract_from_chunks(chunks=chunks)
+
+                # Log document extraction completion
+                self.logger.info(
+                    "document_event_extraction_complete",
+                    doc_id=doc.id,
+                    doc_num=f"{i}/{len(documents)}",
+                    chunk_count=len(chunks),
+                    event_count=len(events),
+                    events_per_chunk=round(len(events) / len(chunks), 2) if chunks else 0,
+                )
 
                 # Apply max_events limit if specified
                 if ctx.max_events and total_events + len(events) > ctx.max_events:
@@ -615,7 +640,7 @@ class PipelineOrchestrator:
                     for event in events:
                         event_record = Event(
                             document_id=doc.id,
-                            event_time=event.event_time,
+                            event_time=event.timestamp,  # ExtractedEvent uses 'timestamp' attribute
                             headline=event.headline,
                             body=event.body,
                             actors=json.dumps(event.actors) if event.actors else None,
@@ -687,14 +712,14 @@ class PipelineOrchestrator:
 
         # Generate embeddings
         event_texts = [f"{e.headline or ''} {e.body or ''}" for e in events]
-        embeddings = await ctx.embedding_service.generate_embeddings_async(event_texts)
+        embeddings = await ctx.embedding_service.embed_batch_async(event_texts)
 
         # Save embeddings to database
         if not ctx.dry_run:
             for event, emb in zip(events, embeddings):
                 embedding_record = Embedding(
                     event_id=event.id,
-                    vector=emb.vector_bytes,
+                    vector=emb.to_bytes(),  # Convert numpy array to bytes
                     model=emb.model,
                     dimensions=emb.dimensions
                 )
@@ -702,12 +727,10 @@ class PipelineOrchestrator:
 
         self._update_progress(ctx, stage, f"Clustering {len(events)} events")
 
-        # Cluster events
-        embedding_vectors = [emb.vector for emb in embeddings]
+        # Cluster events (pass Event objects and Embedding objects)
         clustering_result = ctx.clustering_service.cluster_events(
-            event_ids=[e.id for e in events],
-            embeddings=embedding_vectors,
-            events=[e for e in events]  # Pass event objects for metadata
+            events=events,
+            embeddings=embeddings
         )
 
         # Save clusters to database
@@ -717,7 +740,7 @@ class PipelineOrchestrator:
                     run_id=ctx.run_id,
                     label=cluster.label,
                     centroid_event_id=cluster.centroid_event_id,
-                    member_ids=json.dumps(cluster.event_ids)
+                    member_ids=json.dumps(cluster.member_event_ids)
                 )
                 self.repo.create_event_cluster(cluster_record)
 
@@ -765,23 +788,49 @@ class PipelineOrchestrator:
         self._update_progress(ctx, stage, "Building timeline")
 
         # Get clusters and events
-        clusters = self.repo.get_event_clusters_by_run(ctx.run_id)
-        if not clusters:
+        db_clusters = self.repo.get_event_clusters_by_run(ctx.run_id)
+        if not db_clusters:
             raise ValueError("No clusters found. Run clustering first.")
 
         # Get all events for the run
         all_events = self.repo.get_events_for_run(ctx.run_id)
-        events_by_id = {e.id: e for e in all_events}
 
         # Get documents for URLs
         documents = self.repo.get_documents_by_run(ctx.run_id)
-        doc_by_id = {d.id: d for d in documents}
+
+        # Convert database EventCluster models to service EventCluster dataclasses
+        service_clusters = []
+        for db_cluster in db_clusters:
+            # Parse member_ids from JSON
+            member_ids = json.loads(db_cluster.member_ids) if db_cluster.member_ids else []
+
+            service_cluster = ServiceEventCluster(
+                cluster_id=db_cluster.id,
+                centroid_event_id=db_cluster.centroid_event_id,
+                member_event_ids=member_ids,
+                label=db_cluster.label,
+                confidence_score=0.0,  # Not stored in DB, use default
+                merged_citations=[],   # Will be computed by timeline builder
+                merged_actors=[],      # Will be computed by timeline builder
+            )
+            service_clusters.append(service_cluster)
+
+        # Reconstruct ClusteringResult
+        clustering_result = ClusteringResult(
+            clusters=service_clusters,
+            algorithm=ClusteringAlgorithm.AGGLOMERATIVE,  # Default, not stored in DB
+            n_clusters=len(service_clusters),
+            silhouette_score=0.0,  # Not stored in DB
+            cluster_size_distribution={},  # Not critical for timeline
+            original_count=len(all_events),
+            deduplicated_count=len(service_clusters),
+        )
 
         # Build timeline
         timeline = ctx.timeline_builder.build_timeline(
-            clusters=clusters,
-            events_by_id=events_by_id,
-            documents_by_id=doc_by_id
+            clustering_result=clustering_result,
+            events=list(all_events),
+            documents=documents
         )
 
         # Save timeline to database
@@ -839,15 +888,41 @@ class PipelineOrchestrator:
 
         # Get timeline builder to reconstruct Timeline object
         all_events = self.repo.get_events_for_run(ctx.run_id)
-        events_by_id = {e.id: e for e in all_events}
         documents = self.repo.get_documents_by_run(ctx.run_id)
-        doc_by_id = {d.id: d for d in documents}
-        clusters = self.repo.get_event_clusters_by_run(ctx.run_id)
+        db_clusters = self.repo.get_event_clusters_by_run(ctx.run_id)
+
+        # Convert database EventCluster models to service EventCluster dataclasses
+        service_clusters = []
+        for db_cluster in db_clusters:
+            # Parse member_ids from JSON
+            member_ids = json.loads(db_cluster.member_ids) if db_cluster.member_ids else []
+
+            service_cluster = ServiceEventCluster(
+                cluster_id=db_cluster.id,
+                centroid_event_id=db_cluster.centroid_event_id,
+                member_event_ids=member_ids,
+                label=db_cluster.label,
+                confidence_score=0.0,  # Not stored in DB, use default
+                merged_citations=[],   # Will be computed by timeline builder
+                merged_actors=[],      # Will be computed by timeline builder
+            )
+            service_clusters.append(service_cluster)
+
+        # Reconstruct ClusteringResult
+        clustering_result = ClusteringResult(
+            clusters=service_clusters,
+            algorithm=ClusteringAlgorithm.AGGLOMERATIVE,  # Default, not stored in DB
+            n_clusters=len(service_clusters),
+            silhouette_score=0.0,  # Not stored in DB
+            cluster_size_distribution={},  # Not critical for timeline
+            original_count=len(all_events),
+            deduplicated_count=len(service_clusters),
+        )
 
         timeline = ctx.timeline_builder.build_timeline(
-            clusters=clusters,
-            events_by_id=events_by_id,
-            documents_by_id=doc_by_id
+            clustering_result=clustering_result,
+            events=list(all_events),
+            documents=documents
         )
 
         # Generate forecast (synchronous method)
@@ -858,13 +933,7 @@ class PipelineOrchestrator:
 
         # Save forecast to database
         if not ctx.dry_run:
-            forecast_record = ForecastModel(
-                run_id=ctx.run_id,
-                probability=forecast.probability if isinstance(forecast.probability, float) else None,
-                reasoning=forecast.reasoning,
-                caveats=json.dumps(forecast.caveats) if forecast.caveats else None,
-                raw_response=forecast.raw_output
-            )
+            forecast_record = forecast.to_model(ctx.run_id)
             self.repo.create_forecast(forecast_record)
 
         self._update_stage_state(ctx, PipelineStage.FORECAST)
@@ -874,7 +943,8 @@ class PipelineOrchestrator:
             "stage_complete",
             stage=stage,
             duration=duration,
-            probability=forecast.probability
+            prediction=str(forecast.prediction),
+            prediction_type=forecast.prediction_type.value
         )
 
         return StageMetrics(
@@ -882,7 +952,8 @@ class PipelineOrchestrator:
             duration_seconds=duration,
             success_count=1,
             extra_metrics={
-                'probability': forecast.probability if isinstance(forecast.probability, float) else 0.0,
+                'prediction': str(forecast.prediction),
+                'prediction_type': forecast.prediction_type.value,
                 'confidence_level': forecast.confidence_level.value
             }
         )

@@ -52,9 +52,17 @@ class Settings(BaseSettings):
     )
 
     # LLM Configuration
+    llm_provider: str = Field(
+        default="gemini",
+        description="LLM provider to use: 'gemini' or 'openai'"
+    )
     gemini_model: str = Field(
         default="gemini-2.0-flash-exp",
         description="Gemini model to use for LLM operations"
+    )
+    openai_llm_model: str = Field(
+        default="gpt-4o-mini",
+        description="OpenAI model to use for LLM operations"
     )
     openai_embedding_model: str = Field(
         default="text-embedding-3-large",
@@ -63,6 +71,12 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(
         default=1536,
         description="Embedding vector dimensions"
+    )
+    event_extraction_max_tokens: int = Field(
+        default=4000,
+        ge=1000,
+        le=16000,
+        description="Maximum tokens for event extraction LLM responses"
     )
 
     # Query Generation
@@ -114,6 +128,15 @@ class Settings(BaseSettings):
         """Ensure database URL is SQLite."""
         if not v.startswith("sqlite"):
             raise ValueError("Only SQLite databases are supported")
+        return v
+
+    @field_validator("llm_provider")
+    @classmethod
+    def validate_llm_provider(cls, v: str) -> str:
+        """Ensure LLM provider is valid."""
+        v = v.lower()
+        if v not in ("gemini", "openai"):
+            raise ValueError("LLM provider must be 'gemini' or 'openai'")
         return v
 
     model_config = SettingsConfigDict(

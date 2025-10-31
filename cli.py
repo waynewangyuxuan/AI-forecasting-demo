@@ -110,7 +110,7 @@ def run(
     verbose: bool = typer.Option(
         False,
         "--verbose", "-v",
-        help="Enable verbose logging"
+        help="Show detailed logs (disables progress bar)"
     )
 ):
     """
@@ -133,27 +133,14 @@ def run(
         current_stage["message"] = message
 
     try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TimeElapsedColumn(),
-            console=console
-        ) as progress:
-            task = progress.add_task("[cyan]Running pipeline...", total=8)
+        if verbose:
+            # Verbose mode: no progress bar, show all logs
+            console.print("[yellow]Running in verbose mode - all logs will be displayed[/yellow]")
+            console.print()
 
-            # Wrapper to update progress
-            async def run_with_progress():
+            async def run_verbose():
                 def callback(stage: str, message: str):
-                    progress_callback(stage, message)
-                    progress.update(task, description=f"[cyan]{stage}[/cyan]: {message}")
-                    # Update progress based on stage
-                    stage_map = {
-                        "INIT": 0, "QUERY_GEN": 1, "SEARCH": 2, "SCRAPE": 3,
-                        "EVENT_EXTRACT": 4, "CLUSTER": 5, "TIMELINE": 6, "FORECAST": 7
-                    }
-                    if stage in stage_map:
-                        progress.update(task, completed=stage_map[stage])
+                    console.print(f"[cyan]{stage}[/cyan]: {message}")
 
                 run_id = await run_forecast_pipeline(
                     question_text=question,
@@ -164,11 +151,47 @@ def run(
                     output_dir=output,
                     progress_callback=callback
                 )
-                progress.update(task, completed=8)
                 return run_id
 
-            # Run pipeline
-            run_id = asyncio.run(run_with_progress())
+            run_id = asyncio.run(run_verbose())
+        else:
+            # Normal mode: with progress bar
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TimeElapsedColumn(),
+                console=console
+            ) as progress:
+                task = progress.add_task("[cyan]Running pipeline...", total=8)
+
+                # Wrapper to update progress
+                async def run_with_progress():
+                    def callback(stage: str, message: str):
+                        progress_callback(stage, message)
+                        progress.update(task, description=f"[cyan]{stage}[/cyan]: {message}")
+                        # Update progress based on stage
+                        stage_map = {
+                            "INIT": 0, "QUERY_GEN": 1, "SEARCH": 2, "SCRAPE": 3,
+                            "EVENT_EXTRACT": 4, "CLUSTER": 5, "TIMELINE": 6, "FORECAST": 7
+                        }
+                        if stage in stage_map:
+                            progress.update(task, completed=stage_map[stage])
+
+                    run_id = await run_forecast_pipeline(
+                        question_text=question,
+                        max_urls=max_urls,
+                        max_events=max_events,
+                        dry_run=dry_run,
+                        verbose=verbose,
+                        output_dir=output,
+                        progress_callback=callback
+                    )
+                    progress.update(task, completed=8)
+                    return run_id
+
+                # Run pipeline
+                run_id = asyncio.run(run_with_progress())
 
         # Success!
         console.print()
